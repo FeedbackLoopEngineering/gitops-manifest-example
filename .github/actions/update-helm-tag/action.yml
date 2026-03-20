@@ -1,0 +1,37 @@
+---
+name: Update Helm Tag
+description: Update container tag(s) in helm values files using yq
+
+inputs:
+  type:
+    required: true
+    description: "Type of update (e.g., app)"
+  tag:
+    required: true
+    description: "Container tag to set"
+  environments:
+    required: true
+    description: "Space-separated environments (e.g., \"test\" or \"stage prod\")"
+
+runs:
+  using: composite
+  steps:
+    - name: Update helm tag(s)
+      shell: bash
+      run: |
+        TYPE="${{ inputs.type }}"
+        TAG="${{ inputs.tag }}"
+        export TAG
+
+        HELM_DIR="$TYPE"
+        YQ_EXPR='.tag = strenv(TAG) | .tag style="single"'
+
+        for ENV in ${{ inputs.environments }}; do
+          VALUES_FILE="./helm/${HELM_DIR}/values.${ENV}.yaml"
+          echo "Updating ${VALUES_FILE} with tag=${TAG}..."
+          yq e "$YQ_EXPR" -i "$VALUES_FILE"
+          echo "=== Updated values for ${ENV} ==="
+          cat "$VALUES_FILE"
+          echo "=== git diff for ${ENV} ==="
+          git diff "$VALUES_FILE"
+        done

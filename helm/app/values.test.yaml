@@ -1,0 +1,5 @@
+environment: test
+tag: 'initial'
+env:
+  - name: APP_ENV
+    value: test
