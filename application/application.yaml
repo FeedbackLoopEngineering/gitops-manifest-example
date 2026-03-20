@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: self-managed-app
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: git@github.com:FeedbackLoopEngineering/gitops-manifest-example.git
+    targetRevision: main
+    path: application
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: false
+    syncOptions:
+    - CreateNamespace=true

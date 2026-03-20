@@ -1,0 +1,24 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: app-prod-env
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: git@github.com:FeedbackLoopEngineering/gitops-manifest-example.git
+    targetRevision: main
+    path: helm/app
+    helm:
+      valueFiles:
+      - values.yaml
+      - values.prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: false
+    syncOptions:
+    - CreateNamespace=false

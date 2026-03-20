@@ -1,0 +1,20 @@
+name: app
+
+ecrHost: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com
+image: PROJECT/app
+imagePullPolicy: IfNotPresent
+replicas: 1
+
+serviceAccount:
+  name: svc-app
+  irsaRole: arn:aws:iam::ACCOUNT_ID:role/app-irsa-role
+
+port: 8000
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

@@ -1,0 +1,101 @@
+---
+name: Smoke Test (reusable)
+
+on: # yamllint disable-line rule:truthy
+  workflow_call:
+    inputs:
+      type:
+        required: true
+        type: string
+        description: "Type of update (e.g., app)"
+      tag:
+        required: true
+        type: string
+        description: "Container tag that should be deployed"
+      dry_run:
+        required: false
+        type: boolean
+        default: false
+        description: "If true, report current version instead of waiting for a specific one"
+    secrets:
+      SMOKE_TEST_URL:
+        required: true
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for new version to be deployed
+        if: ${{ !inputs.dry_run }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          URL="${{ secrets.SMOKE_TEST_URL }}"
+
+          echo "Waiting for ${URL}/health to report version=${TAG}..."
+          for i in $(seq 1 60); do
+            RESPONSE=$(curl -s --max-time 10 "${URL}/health" 2>/dev/null || echo "{}")
+            DEPLOYED=$(echo "$RESPONSE" | jq -r '.version // empty' 2>/dev/null || echo "")
+            if [ "$DEPLOYED" = "$TAG" ]; then
+              echo "Version ${TAG} deployed successfully (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i: deployed=${DEPLOYED}, expected=${TAG}, retrying in 10s..."
+            sleep 10
+          done
+          echo "Timed out waiting for version ${TAG} to deploy"
+          exit 1
+
+      - name: Report currently deployed version
+        if: ${{ inputs.dry_run }}
+        run: |
+          URL="${{ secrets.SMOKE_TEST_URL }}"
+
+          echo "Checking currently deployed version at ${URL}/health..."
+          RESPONSE=$(curl -s --max-time 10 "${URL}/health" 2>/dev/null || echo "{}")
+          DEPLOYED=$(echo "$RESPONSE" | jq -r '.version // "unavailable"' 2>/dev/null || echo "unavailable")
+          echo "Currently deployed: ${DEPLOYED}"
+
+      - name: Run smoke tests
+        run: |
+          URL="${{ secrets.SMOKE_TEST_URL }}"
+          FAILURES=0
+
+          echo "=== Smoke Test Suite ==="
+          echo ""
+
+          # Test 1: Health endpoint returns 200
+          echo -n "Test 1: Health endpoint responds with 200... "
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${URL}/health")
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "PASS"
+          else
+            echo "FAIL (got ${HTTP_CODE})"
+            FAILURES=$((FAILURES + 1))
+          fi
+
+          # Test 2: Health endpoint returns valid JSON
+          echo -n "Test 2: Health endpoint returns valid JSON... "
+          RESPONSE=$(curl -s --max-time 10 "${URL}/health")
+          if echo "$RESPONSE" | jq . > /dev/null 2>&1; then
+            echo "PASS"
+          else
+            echo "FAIL (invalid JSON)"
+            FAILURES=$((FAILURES + 1))
+          fi
+
+          # Test 3: Root endpoint is reachable
+          echo -n "Test 3: Root endpoint responds... "
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${URL}/")
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 500 ]; then
+            echo "PASS (HTTP ${HTTP_CODE})"
+          else
+            echo "FAIL (got ${HTTP_CODE})"
+            FAILURES=$((FAILURES + 1))
+          fi
+
+          echo ""
+          if [ "$FAILURES" -gt 0 ]; then
+            echo "${FAILURES} test(s) failed"
+            exit 1
+          fi
+          echo "All smoke tests passed"

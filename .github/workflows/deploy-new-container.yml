@@ -1,0 +1,211 @@
+---
+name: Deploy new container tag
+
+on: # yamllint disable-line rule:truthy
+  workflow_dispatch:
+    inputs:
+      type:
+        description: "Type of update (e.g., app)"
+        required: true
+      tag:
+        description: "The container tag of the upstream commit that triggered this workflow"
+        required: true
+      repo:
+        description: 'Repository triggering the workflow (e.g., "app-example")'
+        required: true
+      pr_number:
+        description: "Pull request number triggering the workflow"
+        required: false
+      pr_url:
+        description: "URL of the pull request triggering the workflow"
+        required: false
+  repository_dispatch:
+    types: [new-tag]
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  deploy-to-test:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.set-values.outputs.tag }}
+      type: ${{ steps.set-values.outputs.type }}
+      repo: ${{ steps.set-values.outputs.repo }}
+      pr_number: ${{ steps.set-values.outputs.pr_number }}
+      pr_url: ${{ steps.set-values.outputs.pr_url }}
+    steps:
+      - name: Set values based on trigger type
+        id: set-values
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+            echo "repo=${{ github.event.inputs.repo }}" >> "$GITHUB_OUTPUT"
+            echo "type=${{ github.event.inputs.type }}" >> "$GITHUB_OUTPUT"
+            echo "pr_number=${{ github.event.inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+            echo "pr_url=${{ github.event.inputs.pr_url }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "tag=${{ github.event.client_payload.tag }}" >> "$GITHUB_OUTPUT"
+            echo "repo=${{ github.event.client_payload.repo }}" >> "$GITHUB_OUTPUT"
+            echo "type=${{ github.event.client_payload.type }}" >> "$GITHUB_OUTPUT"
+            echo "pr_number=${{ github.event.client_payload.pr_number }}" >> "$GITHUB_OUTPUT"
+            echo "pr_url=${{ github.event.client_payload.pr_url }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unsupported event type: ${{ github.event_name }}"
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Update test tag
+        uses: ./.github/actions/update-helm-tag
+        with:
+          type: ${{ steps.set-values.outputs.type }}
+          tag: ${{ steps.set-values.outputs.tag }}
+          environments: test
+
+      - name: Create PR for test deployment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TYPE="${{ steps.set-values.outputs.type }}"
+          TAG="${{ steps.set-values.outputs.tag }}"
+          BRANCH="deploy/test-${TYPE}-${TAG}"
+          HELM_DIR="$TYPE"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${BRANCH}"
+          git add "helm/${HELM_DIR}/values.test.yaml"
+          git commit -m "deploy(test): ${TYPE} ${TAG}"
+          git push --force origin "${BRANCH}"
+
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          gh pr view "${BRANCH}" --json state 2>/dev/null || \
+            gh pr create \
+              --title "deploy(test): ${TYPE} ${TAG}" \
+              --body "Deploy ${TYPE} tag \`${TAG}\` to **test** environment.
+
+          - Source PR: ${{ steps.set-values.outputs.pr_url }}
+
+          - Workflow run: ${WORKFLOW_URL}" \
+              --head "${BRANCH}" \
+              --base main || true
+          echo "PR created or already exists: ${BRANCH}"
+
+          for i in $(seq 1 10); do
+            STATE=$(gh pr view "${BRANCH}" --json state --jq '.state' 2>/dev/null || echo "")
+            if [ "$STATE" = "OPEN" ]; then break; fi
+            echo "Attempt $i: PR not yet visible, waiting 5s..."
+            sleep 5
+          done
+
+          DEPLOY_PR_URL=$(gh pr view "${BRANCH}" --json url --jq '.url' 2>/dev/null || echo "")
+          echo "### Deploy to test" >> "$GITHUB_STEP_SUMMARY"
+          echo "- PR: ${DEPLOY_PR_URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Workflow: ${WORKFLOW_URL}" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Merging PR: ${BRANCH}"
+          gh pr merge --squash "${BRANCH}"
+
+      - name: Wait for PR to merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TYPE="${{ steps.set-values.outputs.type }}"
+          TAG="${{ steps.set-values.outputs.tag }}"
+          BRANCH="deploy/test-${TYPE}-${TAG}"
+
+          for i in $(seq 1 30); do
+            STATE=$(gh pr view "${BRANCH}" --json state --jq '.state')
+            if [ "$STATE" = "MERGED" ]; then
+              echo "PR merged (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i: state=$STATE, waiting 10s..."
+            sleep 10
+          done
+          echo "PR did not merge in time"
+          exit 1
+
+  smoke-test:
+    needs: deploy-to-test
+    uses: ./.github/workflows/smoke-test-reusable.yml
+    with:
+      type: ${{ needs.deploy-to-test.outputs.type }}
+      tag: ${{ needs.deploy-to-test.outputs.tag }}
+    secrets:
+      SMOKE_TEST_URL: ${{ secrets.SMOKE_TEST_URL }}
+
+  promote:
+    needs: [deploy-to-test, smoke-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Update stage and prod tags
+        uses: ./.github/actions/update-helm-tag
+        with:
+          type: ${{ needs.deploy-to-test.outputs.type }}
+          tag: ${{ needs.deploy-to-test.outputs.tag }}
+          environments: stage prod
+
+      - name: Create PR for promotion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TYPE="${{ needs.deploy-to-test.outputs.type }}"
+          TAG="${{ needs.deploy-to-test.outputs.tag }}"
+          BRANCH="promote/${TYPE}-${TAG}"
+          PR_URL="${{ needs.deploy-to-test.outputs.pr_url }}"
+          HELM_DIR="$TYPE"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${BRANCH}"
+          git add "helm/${HELM_DIR}/values.stage.yaml" "helm/${HELM_DIR}/values.prod.yaml"
+          git commit -m "promote(stage,prod): ${TYPE} ${TAG}"
+          git push --force origin "${BRANCH}"
+
+          DEPLOY_BRANCH="deploy/test-${TYPE}-${TAG}"
+          DEPLOY_PR_URL=$(gh pr view "${DEPLOY_BRANCH}" --json url --jq '.url' 2>/dev/null || echo "")
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          gh pr view "${BRANCH}" --json state 2>/dev/null || \
+            gh pr create \
+              --title "promote(stage,prod): ${TYPE} ${TAG}" \
+              --body "Promote ${TYPE} tag \`${TAG}\` to **stage** and **prod**.
+
+          Smoke tests passed against test environment.
+
+          - Source PR: ${PR_URL}
+
+          - Deploy to test PR: ${DEPLOY_PR_URL}
+
+          - Workflow run: ${WORKFLOW_URL}" \
+              --head "${BRANCH}" \
+              --base main || true
+          echo "PR created or already exists: ${BRANCH}"
+
+          for i in $(seq 1 10); do
+            STATE=$(gh pr view "${BRANCH}" --json state --jq '.state' 2>/dev/null || echo "")
+            if [ "$STATE" = "OPEN" ]; then break; fi
+            echo "Attempt $i: PR not yet visible, waiting 5s..."
+            sleep 5
+          done
+
+          PROMOTE_PR_URL=$(gh pr view "${BRANCH}" --json url --jq '.url' 2>/dev/null || echo "")
+          echo "### Promote to stage and prod" >> "$GITHUB_STEP_SUMMARY"
+          echo "- PR: ${PROMOTE_PR_URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Deploy to test PR: ${DEPLOY_PR_URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Workflow: ${WORKFLOW_URL}" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Merging PR: ${BRANCH}"
+          gh pr merge --squash "${BRANCH}"
