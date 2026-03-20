@@ -1,0 +1,21 @@
+name: Receive dispatch
+
+on:
+  repository_dispatch:
+    types: [new-tag]
+
+jobs:
+  log-dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log dispatch payload
+        run: |
+          echo "Event type: ${{ github.event.action }}"
+          echo "Tag: ${{ github.event.client_payload.tag }}"
+          echo "Type: ${{ github.event.client_payload.type }}"
+          echo "Project: ${{ github.event.client_payload.project }}"
+          echo "PR number: ${{ github.event.client_payload.pr_number }}"
+          echo "PR URL: ${{ github.event.client_payload.pr_url }}"
+          echo ""
+          echo "Full payload:"
+          echo '${{ toJSON(github.event.client_payload) }}'
